@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html>
+<head>
+ <title>Speech to Text</title>
+ <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-GLhlTQ8iRABdZLl6O3oVMWSktQOp6b7In1Zl3/Jr59b6EGGoI1aFkw7cmDA6j6gD" crossorigin="anonymous">
+</head>
+
+<body style="background-color: #f2f2f2;">
+ <div class="container mt-5">
+  <div class="row justify-content-center">
+   <div class="col-md-6">
+    <div class="card">
+     <div class="card-header">
+      Upload Audio File
+     </div>
+     <br>
+        <!-- added div#buttons -->
+     <div id="buttons">
+     <!-- added recorder#buttons -->
+     <button id="startRecordingButton">Start talking</button>
+     <button id="stopRecordingButton">Stop</button>
+     <button id="playButton">Play</button>
+            
+     <button id="downloadButton">Clear</button>
+     <button id="submit">Submit</button>
+     </div>
+     <div class="card-body">
+      <form id="transcription-form" enctype="multipart/form-data">
+          <div class="form-group">
+           <label for="file-upload"><b>Select file:</b></label>
+           <input id="file-upload" type="file" name="file" class="form-control-file" accept=".mp3" style="margin-bottom: 20px">
+          </div>
+          <input type="submit" value="Transcribe" class="btn btn-primary"></input>
+      </form>
+     </div>
+
+    </div>
+   </div>
+  </div>
+ </div>
+
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-6">
+            <h1>Transcription:</h1>
+            <!-- add a <div> element to the page to display the transcription text -->
+            <div id="transcription-container"></div>
+        </div>
+      </div>
+    </div>
+ 
+ <script>
+        document.getElementById("transcription-form").addEventListener("submit", async function (event) {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+
+            const response = await fetch("/", {
+                method: "POST",
+                body: formData,
+            });
+            const data = await response.json();
+        
+            if (data.transcription) {
+                localStorage.setItem("transcription", data.transcription);
+                localStorage.setItem("audioFileName", data.audioFileName);
+                window.location.href = "/transcribe.html";
+            } 
+   else {
+                console.error("Error:", data.message);
+            }
+        });
+    </script>
+
+<!-- new add  -->
+<!-- recorder part -->
+    <script>
+        var startRecordingButton = document.getElementById("startRecordingButton");
+        var stopRecordingButton = document.getElementById("stopRecordingButton");
+        var playButton = document.getElementById("playButton");
+        var downloadButton = document.getElementById("downloadButton");
+        var submitButton = document.getElementById('submit');
+        const transcriptionContainer = document.getElementById("transcription-container");
+
+
+        var leftchannel = [];
+        var rightchannel = [];
+        var recorder = null;
+        var recordingLength = 0;
+        var volume = null;
+        var mediaStream = null;
+        var sampleRate = 44100;
+        var context = null;
+        var blob = null;
+        var currentAudio = null;
+
+        startRecordingButton.addEventListener("click", function () {
+            // Initialize recorder
+            navigator.getUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia;
+            navigator.getUserMedia(
+            {
+                audio: true
+            },
+            function (e) {
+                console.log("user consent");
+
+                // creates the audio context
+                window.AudioContext = window.AudioContext || window.webkitAudioContext;
+                context = new AudioContext();
+
+                // creates an audio node from the microphone incoming stream
+                mediaStream = context.createMediaStreamSource(e);
+
+                // https://developer.mozilla.org/en-US/docs/Web/API/AudioContext/createScriptProcessor
+                // bufferSize: the onaudioprocess event is called when the buffer is full
+                var bufferSize = 2048;
+                var numberOfInputChannels = 2;
+                var numberOfOutputChannels = 2;
+                if (context.createScriptProcessor) {
+                    recorder = context.createScriptProcessor(bufferSize, numberOfInputChannels, numberOfOutputChannels);
+                } else {
+                    recorder = context.createJavaScriptNode(bufferSize, numberOfInputChannels, numberOfOutputChannels);
+                }
+
+                recorder.onaudioprocess = function (e) {
+                    leftchannel.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+                    rightchannel.push(new Float32Array(e.inputBuffer.getChannelData(1)));
+                    recordingLength += bufferSize;
+                }
+
+                // we connect the recorder
+                mediaStream.connect(recorder);
+                recorder.connect(context.destination);
+            },
+                        function (e) {
+                            console.error(e);
+                        });
+        });
+
+        stopRecordingButton.addEventListener("click", function () {
+
+            // stop recording
+            recorder.disconnect(context.destination);
+            mediaStream.disconnect(recorder);
+
+            // we flat the left and right channels down
+            // Float32Array[] => Float32Array
+            var leftBuffer = flattenArray(leftchannel, recordingLength);
+            var rightBuffer = flattenArray(rightchannel, recordingLength);
+            // we interleave both channels together
+            // [left[0],right[0],left[1],right[1],...]
+            var interleaved = interleave(leftBuffer, rightBuffer);
+
+            // we create our wav file
+            var buffer = new ArrayBuffer(44 + interleaved.length * 2);
+            var view = new DataView(buffer);
+
+            // RIFF chunk descriptor
+            writeUTFBytes(view, 0, 'RIFF');
+            view.setUint32(4, 44 + interleaved.length * 2, true);
+            writeUTFBytes(view, 8, 'WAVE');
+            // FMT sub-chunk
+            writeUTFBytes(view, 12, 'fmt ');
+            view.setUint32(16, 16, true); // chunkSize
+            view.setUint16(20, 1, true); // wFormatTag
+            view.setUint16(22, 2, true); // wChannels: stereo (2 channels)
+            view.setUint32(24, sampleRate, true); // dwSamplesPerSec
+            view.setUint32(28, sampleRate * 4, true); // dwAvgBytesPerSec
+            view.setUint16(32, 4, true); // wBlockAlign
+            view.setUint16(34, 16, true); // wBitsPerSample
+            // data sub-chunk
+            writeUTFBytes(view, 36, 'data');
+            view.setUint32(40, interleaved.length * 2, true);
+
+            // write the PCM samples
+            var index = 44;
+            var volume = 1;
+            for (var i = 0; i < interleaved.length; i++) {
+                view.setInt16(index, interleaved[i] * (0x7FFF * volume), true);
+                index += 2;
+            }
+
+            // our final blob
+            blob = new Blob([view], { type: 'audio/wav' });
+
+            // // Prepare the file to upload
+            // const fileInput = document.getElementById('file');
+            // const submitButton = document.getElementById('submit');
+            // fileInput.files = new FileListItems([new File([blob], 'recording.wav', { type: 'audio/wav' })]);
+            
+            // // Submit the form
+            // submitButton.click();    
+        });
+
+        playButton.addEventListener("click", function () {
+            if (blob == null) {
+                return;
+            }
+            if (currentAudio === null) {
+                var url = window.URL.createObjectURL(blob);
+                currentAudio = new Audio(url);
+            }
+
+            // var url = window.URL.createObjectURL(blob);
+            // currentAudio = new Audio(url);
+            currentAudio.play();
+        });
+
+        downloadButton.addEventListener("click", function () {
+            if (blob == null) {
+                return;
+            }
+            // console.log("Here is the value of the blob");
+            leftchannel = [];
+            rightchannel = [];
+            recordingLength = 0;
+            // document.getElementById('clear').disabled = true;
+            // document.getElementById('file').value = '';
+            blob = null;
+            // console.log("Here is the value of the blob2");
+            // console.log(blob);
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio.src = "";
+                currentAudio = null;
+            }
+            // var url = URL.createObjectURL(blob);
+
+            // var a = document.createElement("a");
+            // document.body.appendChild(a);
+            // a.style = "display: none";
+            // a.href = url;
+            // a.download = "sample.wav";
+            // a.click();
+            // window.URL.revokeObjectURL(url)
+        });
+
+        // Add an event listener for the submit button
+        submitButton.addEventListener('click',
+        async function () {
+            event.preventDefault();
+            if (blob == null) {
+                console.log("error");
+            }
+            console.log("Here is the value of the blob");
+            const formData = new FormData();
+            formData.append('audio', blob, 'recorded-audio.wav');
+
+            const response = await fetch("/", {
+                method: "POST",
+                body: formData,
+            });
+            const data = await response.json();
+            //console.log(data.transcription)
+            if (data.transcription.includes("Extraversion/Introversion")) {
+                localStorage.setItem("transcription", data.transcription);
+                localStorage.setItem("audioFileName", data.audioFileName);
+                window.location.href = "/transcribe.html";
+            } 
+   else {
+                console.error("Error:", data.message);
+            }
+        });
+
+        
+
+
+        function flattenArray(channelBuffer, recordingLength) {
+            var result = new Float32Array(recordingLength);
+            var offset = 0;
+            for (var i = 0; i < channelBuffer.length; i++) {
+                var buffer = channelBuffer[i];
+                result.set(buffer, offset);
+                offset += buffer.length;
+            }
+            return result;
+        }
+
+        function interleave(leftChannel, rightChannel) {
+            var length = leftChannel.length + rightChannel.length;
+            var result = new Float32Array(length);
+
+            var inputIndex = 0;
+
+            for (var index = 0; index < length;) {
+                result[index++] = leftChannel[inputIndex];
+                result[index++] = rightChannel[inputIndex];
+                inputIndex++;
+            }
+            return result;
+        }
+
+        function writeUTFBytes(view, offset, string) {
+            for (var i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+    </script>
+
+    <script>
+        const audioFileName = localStorage.getItem("audioFileName");
+        const transcription = localStorage.getItem("transcription");
+        document.getElementById("audioFileName").innerHTML = audioFileName;
+        document.getElementById("transcription").innerHTML = transcription;
+    </script>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js" integrity="sha384-w76AqPfDkMBDXo30jS1Sgez6pr3x5MlQ1ZAGC+nuZB+EYdgRZgiwxhTBTkF7CXvN" crossorigin="anonymous"></script>
+</body>
+</html>
